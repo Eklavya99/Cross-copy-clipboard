@@ -1,0 +1,19 @@
+[package]
+name = "crossclip"
+description = "CrossClip agent: a shared clipboard between your Windows and Ubuntu machines."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossclip-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+crossclip-win.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+crossclip-dbus.workspace = true
+
+[lints]
+workspace = true

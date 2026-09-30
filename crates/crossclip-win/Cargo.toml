@@ -1,0 +1,13 @@
+[package]
+name = "crossclip-win"
+description = "Windows desktop integration for CrossClip: hotkeys, clipboard, synthetic input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossclip-core.workspace = true
+
+[lints]
+workspace = true

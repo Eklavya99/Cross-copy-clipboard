@@ -1,0 +1,9 @@
+{
+  "uuid": "crossclip@eklavya99.github.io",
+  "name": "CrossClip",
+  "description": "A shared Cross Clipboard between your machines. Ctrl+Alt+C / Ctrl+Alt+X to cross-copy or cross-cut, Ctrl+Alt+V to cross-paste.",
+  "shell-version": ["49", "50"],
+  "settings-schema": "org.gnome.shell.extensions.crossclip",
+  "url": "https://github.com/Eklavya99/Cross-copy-clipboard",
+  "version-name": "0.1.0"
+}
