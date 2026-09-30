@@ -1,326 +1,334 @@
 # CrossClip — Design Document
 
-Status: **Draft v0.1** · Scope: Windows ⇄ Ubuntu clipboard sharing
+Status: **Draft v0.2** · Scope: Windows 10/11 ⇄ Ubuntu 26.04 LTS (GNOME, Wayland)
+
+Changes since v0.1: the design moved from "mirror the normal clipboard
+automatically" to a **separate, hotkey-driven Cross Clipboard**. On Ubuntu, a
+GNOME Shell extension now handles the hotkeys, clipboard access and keystrokes,
+and there is no X11 fallback. We also set a strict resource and dependency budget.
 
 ## 1. Problem
 
-I work across two machines (mostly one Windows, one Ubuntu) and constantly move
-text, code snippets and screenshots between them. Today that means chat apps,
-email-to-self or shared files. The goal is:
+I work across two machines on the same network, one Windows and one Ubuntu, and
+often need to copy or cut something (text, code, a screenshot) on one and paste
+it on the other. Today that means chat apps, email-to-self or shared files.
 
-> Copy on machine A → paste on machine B, with no extra steps.
+## 2. Requirements
 
-## 2. Goals and non-goals
+| # | Requirement |
+|---|---|
+| R1 | Move **text/code** and **images** from one machine to the other. |
+| R2 | Triggered only by **dedicated shortcuts**. Normal `Ctrl+C` / `Ctrl+V` keep working exactly as today. |
+| R3 | After the shortcut, transfer is **automatic**. There is nothing to click on either machine. |
+| R4 | **Windows 10/11** and **Ubuntu 26.04 LTS on Wayland** (GNOME). |
+| R5 | Same LAN, zero configuration after a one-time pairing. |
+| R6 | Encrypted; only paired devices can exchange data. |
+| R7 | **Very light background load** (≈0 % CPU when idle, low memory), and **no extra software to install** (no Python, runtimes, OpenSSL, Avahi, etc.). |
 
-### Goals (v1)
-- Sync **plain text / code** (UTF-8) and **images** (screenshots) between paired devices.
-- Work on **Windows 10/11** and **Ubuntu 22.04+** (X11 and GNOME Wayland).
-- **Automatic** sync on copy, plus a manual "send now" hotkey and a pause toggle.
-- **Zero-config on a LAN**: devices find each other automatically.
-- **Secure by default**: only explicitly paired devices can exchange data; all traffic is encrypted.
-- Runs quietly in the background (tray icon), starts on login, low CPU/memory.
+Later (v2+): files, rich text/HTML, history, more than two devices, working across networks.
 
-### Later (v2+)
-- Rich text / HTML, file and folder copy.
-- Clipboard history with search.
-- Sync across different networks (via a relay or overlay network).
-- More than two devices, macOS.
+## 3. User experience
 
-### Non-goals
-- A cloud service that stores clipboard contents.
-- Mobile clients (for now).
+### 3.1 The Cross Clipboard
 
-## 3. How it works (high level)
+CrossClip adds a **second clipboard** that is shared between the two machines.
+It holds one item (the latest). Your normal clipboard stays separate from it.
 
-Each machine runs the same background app (the **agent**). Agents discover each
-other on the local network, authenticate with keys exchanged during a one-time
-pairing, and keep a persistent encrypted connection open. When the local
-clipboard changes, the agent reads it, normalizes it into a portable format and
-pushes it to the peer, which writes it into its own clipboard.
+| Shortcut (default, configurable) | What it does |
+|---|---|
+| **`Ctrl+Alt+C`** — Cross-copy | Copies the current selection into the Cross Clipboard and sends it to the other machine at once. |
+| **`Ctrl+Alt+X`** — Cross-cut | Same, but cuts the selection. |
+| **`Ctrl+Alt+V`** — Cross-paste | Pastes the Cross Clipboard item into the focused app. Works on **either** machine. |
+
+Example: select code in VS Code on Windows → `Ctrl+Alt+C` → switch to Ubuntu →
+`Ctrl+Alt+V` in the editor. A small notification ("Received: 42 lines of text" /
+"Received: image 1920×1080") confirms arrival.
+
+**Screenshots:** take a screenshot to the clipboard as usual (`Win+Shift+S`,
+`PrtSc` on Ubuntu), then press `Ctrl+Alt+C`. If the copy keystroke doesn't
+change the clipboard (nothing selected), CrossClip sends whatever is already on
+the normal clipboard. See §5.3 for an editor edge case.
+
+### 3.2 The normal clipboard is left alone
+
+Under the hood, cross-copy and cross-paste use the system clipboard for a moment,
+because that is how apps exchange data. CrossClip **saves the normal clipboard
+before the action and restores it afterwards** (default on). So `Ctrl+V` still
+pastes what you last copied with `Ctrl+C`.
+
+- Restore is *best effort*: text, images, HTML and other data-based formats are
+  restored. Very large or unusual formats (for example a huge Excel range) are
+  skipped when they exceed a size limit.
+- Temporary writes are hidden from Windows clipboard history (`Win+V`) with the
+  `ExcludeClipboardContentFromMonitorProcessing` and
+  `CanIncludeInClipboardHistory=0` formats.
+- Setting `also_set_normal_clipboard = true` makes received items **also** land on the
+  receiving machine's normal clipboard, for people who prefer plain `Ctrl+V`.
+
+### 3.3 Other UX details
+- If the other machine is offline, the item is queued and delivered when it
+  reconnects. Only the latest item is kept.
+- If you press `Ctrl+Alt+V` while a large item is still arriving, the paste waits
+  (up to 10 s) with a "Receiving…" notification.
+- **Status indicator:** tray icon on Windows, top-bar icon on GNOME. It shows
+  connected / disconnected and offers a menu with Pair device, Settings, Pause and Quit.
+
+## 4. Architecture
 
 ```mermaid
 flowchart LR
-    subgraph WIN["Windows agent"]
-        WCB["Clipboard backend<br/>(Win32 listener)"] --> WSE["Sync engine"]
-        WSE --> WNET["Transport<br/>(mTLS)"]
-        WUI["Tray / hotkeys / settings"] --- WSE
+    subgraph WIN["Windows — crossclip.exe (single process)"]
+        WH["Hotkeys<br/>RegisterHotKey"] --> WA["Action runner<br/>copy/cut/paste"]
+        WA <--> WCB["Win32 clipboard<br/>+ SendInput"]
+        WA <--> WCORE["Core: Cross Clipboard,<br/>protocol, pairing"]
+        WCORE <--> WNET["TLS transport<br/>+ mDNS"]
     end
-    subgraph LNX["Ubuntu agent"]
-        LCB["Clipboard backend<br/>(X11 / Wayland / GNOME ext)"] --> LSE["Sync engine"]
-        LSE --> LNET["Transport<br/>(mTLS)"]
-        LUI["Tray / hotkeys / settings"] --- LSE
+    subgraph LNX["Ubuntu"]
+        EXT["GNOME Shell extension (JS)<br/>hotkeys · St.Clipboard ·<br/>virtual keyboard · top-bar icon"]
+        EXT <-- "D-Bus (session bus)" --> LCORE["crossclip agent (Rust)<br/>Core + TLS + mDNS<br/>systemd user service"]
     end
-    WNET <== "TLS 1.3 over TCP (LAN)<br/>mDNS discovery" ==> LNET
+    WNET <== "TLS 1.3, pinned certs, LAN" ==> LCORE
 ```
 
-## 4. Components
+The **core** (Cross Clipboard state, wire protocol, pairing, trust store,
+transport, discovery) is shared Rust code. Only the "desktop integration"
+differs:
 
-The agent is one process with clearly separated modules. Everything except the
-clipboard backend and the UI shell is platform-independent.
+- **Windows:** everything runs in one Rust executable.
+- **Ubuntu (GNOME Wayland):** Wayland does not let ordinary background apps grab
+  global hotkeys, read the clipboard or send keystrokes. **GNOME Shell
+  extensions can do all three**, so a small extension handles the desktop side
+  and talks to the Rust agent over D-Bus. The agent handles networking and crypto.
 
-| Module | Responsibility |
-|---|---|
-| **Clipboard backend** | Watch for changes, read and write clipboard formats. One implementation per platform (see §5). |
-| **Content model** | Platform-neutral representation of a clip (`ClipItem`). Converts to/from native formats. |
-| **Sync engine** | Decides *what* to send and *when*: dedupe, loop prevention, size limits, privacy filters, pause state. |
-| **Discovery** | Advertises and browses for peers via mDNS; supports manual `host:port` as a fallback. |
-| **Transport** | Mutually authenticated TLS connection with reconnect/backoff; framing and chunking. |
-| **Pairing & trust store** | One-time pairing flow; stores peer IDs and certificate fingerprints. |
-| **UI shell** | Tray icon, notifications, global hotkeys, settings window, autostart. |
-| **Local control API** | Named pipe (Windows) / Unix socket (Linux) for a CLI and, on GNOME Wayland, the shell extension. |
+### Why the extension approach is right for Ubuntu 26.04
+- GNOME 49+ has removed the X11 session, so there is no Xorg fallback anymore.
+- The hotkey-driven model needs exactly three desktop capabilities: a global
+  shortcut, clipboard read/write and a synthetic keystroke. An extension gets all
+  three from supported Shell APIs: `Main.wm.addKeybinding`, `St.Clipboard` and a
+  Clutter virtual input device.
+- No clipboard *watching* is needed, which avoids the hardest Wayland limitation.
+- The extension stays thin (a few hundred lines of JS). All logic that could
+  have bugs, such as protocol and crypto, lives in Rust and is shared with Windows.
 
-### 4.1 Content model
+## 5. Action flows
 
-```text
-ClipItem {
-  id:          UUIDv7          // time-ordered, unique
-  origin:      DeviceId        // who copied it
-  created_at:  timestamp
-  hash:        SHA-256 of the canonical payload
-  kind:        Text | Image | Html | Files     // v1: Text, Image
-  payload:
-    Text  -> UTF-8 string
-    Image -> PNG bytes (+ width, height)
-    Html  -> HTML fragment + plain-text fallback              (v2)
-    Files -> list of {name, size, sha256}; bytes streamed     (v2)
-}
-```
-
-**Normalization rules**
-- **Text** is always sent as UTF-8. Line endings are sent unchanged (modern
-  editors on both OSes handle LF and CRLF); an optional setting can convert them
-  to the receiver's native style.
-- **Images** are always sent as **PNG**. Windows exposes `CF_DIB`/`CF_DIBV5`
-  (and often a registered `PNG` format); Linux exposes `image/png`. The backend
-  converts to/from PNG, taking care to preserve alpha from `CF_DIBV5`.
-- When a clip carries several formats (e.g. a browser copy with HTML + text),
-  v1 syncs the best supported one and always includes plain text if it exists.
-
-## 5. Platform clipboard backends
-
-This is the hardest and most platform-specific part of the project.
-
-### 5.1 Windows
-- **Change notification:** `AddClipboardFormatListener` on a hidden message-only
-  window → `WM_CLIPBOARDUPDATE`. No polling.
-- **Read/write:** `OpenClipboard` / `GetClipboardData` / `SetClipboardData` for
-  `CF_UNICODETEXT`, `CF_DIBV5`, registered `PNG`, and later `HTML Format` and `CF_HDROP`.
-- **Privacy:** skip clips that contain `ExcludeClipboardContentFromMonitorProcessing`
-  or have `CanIncludeInClipboardHistory = 0` — password managers set these.
-- `OpenClipboard` can fail while another app holds the clipboard, so reads need a
-  short retry loop.
-
-### 5.2 Ubuntu on X11 ("Ubuntu on Xorg")
-- **Change notification:** XFixes `SelectSelectionInput` on the `CLIPBOARD` selection.
-- **Read:** request `UTF8_STRING` / `text/plain;charset=utf-8` / `image/png` targets.
-- **Write:** become the selection owner and serve requests. The agent is a
-  long-running process, so clipboard contents stay available after the copy.
-- **Privacy:** skip clips that offer the `x-kde-passwordManagerHint` target
-  (KeePassXC and others set this).
-
-### 5.3 Ubuntu on Wayland (default since 22.04) — **main technical risk**
-Wayland deliberately stops background apps from reading the clipboard.
-- Compositors that implement the **data-control** protocol (`wlr-data-control` /
-  `ext-data-control`: KDE Plasma, Sway, Hyprland, …) let us watch and set the
-  clipboard directly (as `wl-clipboard` does).
-- **GNOME (Mutter)**, Ubuntu's default, has historically **not** exposed
-  data-control to regular clients. Background watching does not work there, and
-  X11 fallbacks via XWayland only see changes when an X11 window has focus.
-
-Options for GNOME Wayland, in order of preference:
-1. **GNOME Shell extension (recommended).** A small extension watches
-   `Meta.Selection`'s `owner-changed` signal and reads/writes via `St.Clipboard`,
-   the same way popular clipboard-manager extensions do. It forwards content to the
-   agent over the local control API (Unix socket or D-Bus). This keeps full
-   automatic sync on stock Ubuntu.
-2. **Use the Xorg session.** Simplest, but asks the user to change their desktop session.
-3. **Hotkey-only mode.** A global hotkey briefly focuses a tiny agent window to
-   read the clipboard and send it. Works anywhere but loses automatic sync.
-
-The agent picks the backend at runtime from `XDG_SESSION_TYPE`,
-`XDG_CURRENT_DESKTOP` and protocol availability. **Milestone 0 must validate this
-on the actual Ubuntu version in use** (run `echo $XDG_SESSION_TYPE`).
-
-## 6. Networking
-
-### 6.1 Discovery
-- Each agent advertises `_crossclip._tcp.local` via **mDNS/DNS-SD** with TXT
-  records `id=<device-id>`, `name=<hostname>`, `v=<protocol-version>`.
-- Browsing for peers happens continuously. When a *paired* device appears, connect.
-- Fallback: manually configured `host:port` (for networks that block multicast,
-  VPNs, or Windows Firewall quirks).
-- Default port: **TCP 53317** (configurable). The Windows installer adds a
-  firewall rule limited to private networks.
-
-### 6.2 Transport and security
-- Each device generates a long-lived **Ed25519 / ECDSA key pair** and a
-  self-signed certificate on first run. The certificate fingerprint *is* the
-  device identity.
-- Connections use **TLS 1.3 with mutual authentication**. Normal CA validation is
-  replaced by **certificate pinning**: a peer is accepted only if its fingerprint
-  is in the trust store.
-- Only one connection per peer pair; the device with the lexicographically
-  smaller ID keeps its outgoing connection if both dial at once.
-- Heartbeat `PING` every 15 s; reconnect with exponential backoff (1 s → 30 s).
-
-### 6.3 Pairing (one time)
-Numeric comparison, as used by Bluetooth:
-1. On device A, choose **Pair new device** and pick B from the discovered list
-   (or enter an IP address).
-2. A and B open a temporary TLS connection **without** pinning and exchange certificates.
-3. Both show a **6-digit code** derived from `SHA-256(certA ‖ certB)` (sorted).
-4. The user checks that both screens show the same code and clicks **Confirm** on both.
-5. Each side stores the other's fingerprint and name. Later connections are fully pinned.
-
-A man-in-the-middle would produce different codes on the two screens, so the
-user's comparison is what makes pairing secure. No shared secret has to be typed.
-
-### 6.4 Wire protocol
-Length-prefixed frames on the TLS stream:
-
-```text
-frame := u32 frame_len (BE) | u16 header_len (BE) | header (JSON) | body (bytes)
-```
-
-| Type | Direction | Header fields | Body |
-|---|---|---|---|
-| `HELLO` | both | `device_id`, `name`, `proto_version`, `capabilities[]` | – |
-| `CLIP` | sender → receiver | `id`, `origin`, `kind`, `mime`, `size`, `sha256`, `created_at`, `chunks` | first chunk |
-| `CHUNK` | sender → receiver | `id`, `index` | ≤ 1 MiB of payload |
-| `ACK` | receiver → sender | `id`, `status` (`applied` / `rejected:<reason>`) | – |
-| `PING` / `PONG` | both | `ts` | – |
-
-- Payloads over 1 MiB are split into chunks. The receiver checks `sha256` before
-  touching the clipboard.
-- Default maximum clip size: **50 MiB** (configurable). Bigger items are refused
-  with a notification.
-- `proto_version` + `capabilities` allow later features (HTML, files, lazy
-  transfer) without breaking older agents.
-
-## 7. Sync engine behaviour
+### 5.1 Cross-copy / cross-cut
 
 ```mermaid
 sequenceDiagram
-    participant U as User (Windows)
-    participant W as Windows agent
-    participant L as Ubuntu agent
-    participant C as Ubuntu clipboard
-    U->>W: Ctrl+C
-    W->>W: WM_CLIPBOARDUPDATE → read → normalize → hash
-    W->>W: filters (paused? secret? too big? duplicate?)
-    W->>L: CLIP (+CHUNKs)
-    L->>L: verify sha256, record hash as "applied"
-    L->>C: write clipboard
-    C-->>L: change event (our own write)
-    L->>L: hash == last applied → ignore (no echo)
-    L->>W: ACK applied
+    participant U as User
+    participant D as Desktop layer (Win32 / GNOME ext)
+    participant A as Agent core
+    participant P as Peer agent
+    U->>D: Ctrl+Alt+C
+    D->>D: wait until user releases Ctrl/Alt (≤ 1 s)
+    D->>D: snapshot normal clipboard (for restore)
+    D->>D: synthesize Ctrl+C (or Ctrl+X)
+    D->>D: wait for clipboard change (≤ 400 ms)
+    D->>A: item (text / PNG)
+    D->>D: restore normal clipboard
+    A->>A: store as Cross Clipboard item
+    A->>P: CLIP (+ CHUNKs)
+    P->>P: verify hash, store as Cross Clipboard item, notify
+    P-->>A: ACK
 ```
 
-- **Loop prevention:** after writing a remote clip, the agent stores its hash. A
-  local change event with the same hash is ignored. Windows backends also add a
-  private marker format to the clipboard as a second check.
-- **Debounce:** some apps update the clipboard several times in a row (for
-  example delayed rendering or multiple formats). Wait about 150 ms after the
-  last change before reading.
-- **Dedupe:** do not resend a clip whose hash matches the last one sent.
-- **Conflicts:** last writer wins by `created_at`, with `device_id` as tie-breaker.
-  With two devices and human-speed copying this rarely matters.
-- **Modes:** `auto` (default), `manual` (only the hotkey sends), `receive-only`, `paused`.
-- **Filters:** secret or password-manager hints (§5), max size, and an optional
-  app blocklist on Windows (via `GetClipboardOwner` → process name).
+### 5.2 Cross-paste
 
-## 8. User experience
+1. Wait for modifier release, then snapshot the normal clipboard.
+2. Write the Cross Clipboard item to the system clipboard (hidden from history on Windows).
+3. Synthesize `Ctrl+V`.
+4. After about 500 ms, restore the normal clipboard. The delay is needed because
+   the target app reads the clipboard asynchronously; it is configurable.
 
-- **Tray icon** showing state (connected / disconnected / paused) with a menu:
-  Pause, Send now, Paired devices, Settings, Quit.
-- **Hotkeys** (configurable): `Ctrl+Alt+C` to send now, `Ctrl+Alt+P` to pause or resume.
-- **Notification** when a clip arrives (optional, off by default for text).
-- **Autostart:** Windows `Run` registry key or a Startup shortcut; Linux
-  `~/.config/autostart/crossclip.desktop` (or a systemd user service).
-- **Config:** TOML at `%APPDATA%\CrossClip\config.toml` and
-  `~/.config/crossclip/config.toml`. Trust store and keys live next to it.
-- **CLI** (for scripts): `crossclip status`, `crossclip pair`, `crossclip send < file.txt`,
-  `crossclip send --image shot.png`.
+### 5.3 Details that matter
 
-## 9. Technology choice
+- **Held modifiers:** the hotkey fires while the user still holds `Ctrl+Alt`. If we
+  sent `Ctrl+C` at that moment, the app would see `Ctrl+Alt+C`. The desktop layer
+  waits until the physical modifiers are released: `GetAsyncKeyState` on Windows,
+  the modifier mask from `global.get_pointer()` on GNOME. If the user keeps
+  holding them, it releases them synthetically after 1 s.
+- **Terminals:** in a terminal `Ctrl+C` interrupts the running program. On GNOME,
+  the extension checks the focused window's `wm_class` (Ptyxis, GNOME Terminal,
+  Kitty, Alacritty, …) and uses `Ctrl+Shift+C/V` there instead. The list is
+  configurable. Windows Terminal handles `Ctrl+C`/`Ctrl+V` correctly when text is
+  selected; classic `conhost` gets the same per-app override.
+- **Nothing selected:** most apps leave the clipboard unchanged. Then we send the
+  current normal clipboard (covers the screenshot case). Some editors, for example
+  VS Code, copy the *current line* when nothing is selected. That is expected
+  editor behaviour and is documented.
+- **Elevated windows (Windows):** a normal process cannot send keystrokes to an
+  app running as Administrator. We show a notification ("Can't paste into an
+  elevated window") instead of failing silently.
+- **Detecting the change:** Windows compares `GetClipboardSequenceNumber()`
+  before and after. GNOME listens to `Meta.Selection` `owner-changed`.
 
-| Option | Pros | Cons |
+## 6. Components
+
+### 6.1 Core (shared Rust)
+| Module | Responsibility |
+|---|---|
+| `model` | `ClipItem { id: UUIDv7, origin, created_at, sha256, kind: Text\|Image, payload }`. Text is UTF-8 sent unchanged. Images are always PNG on the wire. |
+| `state` | The single Cross Clipboard slot, the outgoing queue for an offline peer, last-writer-wins by `created_at` (device id as tie-breaker). |
+| `proto` | Frame encoding and decoding (§7.4). |
+| `net` | TLS 1.3 transport, reconnect with backoff, heartbeats. |
+| `discovery` | mDNS advertise and browse, plus a manual `host:port` fallback. |
+| `pairing` / `trust` | One-time pairing and the pinned-fingerprint trust store. |
+| `config` | TOML config, hotkeys, limits, the terminal/app override list. |
+
+### 6.2 Windows desktop layer (Rust, same binary)
+- A hidden message-only window receives `WM_HOTKEY` (via `RegisterHotKey`).
+  No keyboard hook and no polling.
+- Clipboard: Win32 `OpenClipboard`/`GetClipboardData`/`SetClipboardData` for
+  `CF_UNICODETEXT`, `PNG`/`CF_DIBV5`. `OpenClipboard` is retried briefly when
+  another app holds the clipboard. Snapshot and restore enumerate all
+  memory-backed formats.
+- Keystrokes: `SendInput`.
+- Images: DIB ⇄ PNG conversion, preserving alpha from `CF_DIBV5`.
+- Tray icon and menu; notifications via Windows toast.
+- Autostart: `HKCU\...\Run` entry. **No admin rights needed.**
+
+### 6.3 GNOME Shell extension (JavaScript, ESM, GNOME 49/50)
+- Registers the three keybindings from its GSettings schema.
+- Reads and writes the clipboard with `St.Clipboard.get_content` / `set_content`
+  (`text/plain;charset=utf-8`, `image/png`). Snapshot and restore use
+  `get_mimetypes()` followed by per-type reads.
+- Synthesizes keys through `Clutter` virtual keyboard device.
+- Top-bar indicator, notifications (`Main.notify`) and the pairing confirmation dialog.
+- Talks to the agent over the D-Bus session bus (§6.4).
+
+### 6.4 Ubuntu agent (Rust) and its D-Bus interface
+The agent is the same core as on Windows, built without the Win32 layer. It runs
+as a **systemd user service** (`~/.config/systemd/user/crossclip.service`), so it
+starts on login and restarts if it crashes, without root.
+
+Bus name `io.github.eklavya99.CrossClip`, object `/io/github/eklavya99/CrossClip`:
+
+| Member | Kind | Purpose |
 |---|---|---|
-| **Rust** (recommended) | Single small native binary, low memory, strong cross-platform crates (`arboard`, `tokio`, `rustls`, `mdns-sd`, `tray-icon`, `global-hotkey`, `image`), safe concurrency | Slower to prototype; learning curve |
-| Go | Simple, fast to write, easy cross-compilation for networking | Clipboard libraries need cgo on Linux and have weaker image and Wayland support; tray and hotkey libraries are less mature |
-| Python | Fastest prototype (`pyperclip`, `Pillow`, `zeroconf`) | Distribution (PyInstaller) is clunky, and native clipboard watching still needs per-OS code |
-| Electron / Tauri | Nice UI | Heavy (Electron); clipboard *watching* still needs native code |
+| `Push(kind s, mime s, path s)` | method | Extension hands a new Cross Clipboard item to the agent. |
+| `Fetch() → (kind s, mime s, path s)` | method | Extension gets the current item for pasting. |
+| `ItemReceived(kind s, summary s)` | signal | Peer sent something; used for the notification. |
+| `StatusChanged(state s, peer s)` | signal | Connected / disconnected / pairing. |
+| `StartPairing()`, `ConfirmPairing(code s, accept b)` | method / signal | Pairing UI lives in the extension. |
 
-**Recommendation: Rust**, with a Cargo workspace. A quick Python spike is fine for
-Milestone 0 if it helps validate the platform clipboard behaviour faster.
+Payloads are passed as files in `$XDG_RUNTIME_DIR/crossclip/`, which is a
+per-user tmpfs with mode 0700 and never touches disk. Only the paths go over
+D-Bus, so large images never hit D-Bus message size limits.
 
-Suggested crates:
-- Async and networking: `tokio`, `tokio-rustls`, `rustls`, `rcgen` (self-signed certs), `mdns-sd`
-- Clipboard: `arboard` for read/write (text and images on Windows, X11 and Wayland data-control) plus our own change watchers (`windows` crate, `x11rb` XFixes, `wayland-client`)
-- Images: `image` / `png`
-- UI: `tray-icon`, `muda` (menus), `global-hotkey`, `notify-rust`
-- Misc: `serde`, `serde_json`, `toml`, `uuid`, `sha2`, `tracing`, `directories`
+## 7. Networking
 
-### Proposed repository layout
+### 7.1 Discovery
+- mDNS/DNS-SD service `_crossclip._tcp.local` with TXT records `id`, `name`
+  and `v` (protocol version). A pure-Rust implementation is used, so Avahi and
+  Bonjour are not needed.
+- A manual `host:port` in the config works when multicast is blocked (for
+  example on corporate Wi-Fi).
+- Default port **TCP 53317**. On first run Windows shows its standard firewall
+  prompt; choose **Private networks**.
+
+### 7.2 Transport security
+- On first run each device creates a key pair and a self-signed certificate. Its
+  fingerprint is the device ID.
+- Connections use **TLS 1.3 with mutual authentication and pinned
+  fingerprints**: only certificates in the trust store are accepted.
+- There is one connection per peer (the lower device ID wins a dial race). A
+  heartbeat is sent every 30 s, and reconnects use backoff from 1 s to 30 s.
+
+### 7.3 Pairing (one time, numeric comparison)
+1. On one machine, choose **Pair device** and pick the other machine from the
+   discovered list (or type its IP).
+2. The machines connect without pinning and exchange certificates.
+3. Both show a **6-digit code** derived from `SHA-256(sorted(certA, certB))`.
+4. Confirm on both machines that the codes match. The fingerprints are stored,
+   and from then on all connections are pinned.
+
+### 7.4 Wire protocol
+```text
+frame := u32 frame_len (BE) | u16 header_len (BE) | header (JSON) | body (bytes)
+```
+| Type | Header fields | Body |
+|---|---|---|
+| `HELLO` | `device_id`, `name`, `proto_version`, `capabilities[]` | – |
+| `CLIP` | `id`, `origin`, `kind`, `mime`, `size`, `sha256`, `created_at`, `chunks` | first chunk |
+| `CHUNK` | `id`, `index` | ≤ 1 MiB |
+| `ACK` | `id`, `status` | – |
+| `PING` / `PONG` | `ts` | – |
+
+The receiver verifies `sha256` before storing an item. Items are limited to
+**50 MiB** by default. `proto_version` and `capabilities` let later versions add
+files and HTML without breaking older agents.
+
+## 8. Resource and dependency budget
+
+| Budget | Target | How |
+|---|---|---|
+| Idle CPU | ~0 % (no polling, no timers except a 30 s heartbeat) | Event-driven only: `WM_HOTKEY`, D-Bus calls, socket readiness. Single-threaded `tokio` runtime. |
+| Idle memory | < 10 MB RSS (Windows exe / Linux agent) | No GUI toolkit; the item is freed once replaced. The extension adds negligible memory inside GNOME Shell. |
+| Binary size | ~3–6 MB, stripped with LTO | `rustls` instead of OpenSSL; no async-std/GUI frameworks. |
+| **Runtime installs** | **None** | Windows: one `crossclip.exe`. Ubuntu: one `crossclip` binary, one extension folder and one systemd unit, all in `~/.local`/`~/.config`. No `apt install` and no root. |
+| Build tools (developer only) | Rust toolchain | Cross-compile Windows from Linux with `cargo-xwin`, or build natively on each OS. |
+
+Planned crates (all pure Rust, no system libraries):
+`tokio` (rt, net, time), `rustls` + `tokio-rustls`, `rcgen`, `mdns-sd`,
+`serde`/`serde_json`, `toml`, `sha2`, `uuid`, `directories`, `tracing`.
+Windows only: `windows` (Win32 bindings), `png`, `tray-icon`.
+Linux only: `zbus` (pure-Rust D-Bus; no libdbus).
+
+## 9. Repository layout
 
 ```text
 Cross-copy-clipboard/
-├── Cargo.toml                  # workspace
+├── Cargo.toml                   # workspace
 ├── crates/
-│   ├── crossclip-core/         # ClipItem, protocol frames, sync engine (no OS code)
-│   ├── crossclip-clipboard/    # Backend trait + windows / x11 / wayland / gnome-bridge
-│   ├── crossclip-net/          # discovery, TLS transport, pairing, trust store
-│   └── crossclip-agent/        # binary: tray, hotkeys, config, CLI, wiring
-├── gnome-extension/            # GNOME Shell extension (Wayland bridge)
-├── packaging/                  # MSI/installer (Windows), .deb (Ubuntu)
-└── docs/
-    └── DESIGN.md
-```
-
-Key abstraction:
-
-```rust
-#[async_trait]
-pub trait ClipboardBackend: Send + Sync {
-    /// Stream of "clipboard changed" events (debounced by the engine).
-    fn watch(&self) -> BoxStream<'static, ()>;
-    /// Read the current clipboard in the best supported normalized format.
-    async fn read(&self) -> Result<Option<ClipContent>>;
-    /// Replace the clipboard contents.
-    async fn write(&self, content: &ClipContent) -> Result<()>;
-}
+│   ├── crossclip-core/          # model, state, proto, net, discovery, pairing, config
+│   ├── crossclip-win/           # Win32 hotkeys, clipboard, SendInput, tray (cfg(windows))
+│   ├── crossclip-dbus/          # D-Bus service for the GNOME extension (cfg(linux))
+│   └── crossclip/               # the binary: wires core + platform layer, CLI
+├── gnome-extension/
+│   └── crossclip@eklavya99.github.io/
+│       ├── metadata.json
+│       ├── extension.js
+│       ├── prefs.js
+│       └── schemas/
+├── packaging/
+│   ├── install-ubuntu.sh        # copies binary, unit, extension; enables them
+│   └── windows/                 # optional installer later
+└── docs/DESIGN.md
 ```
 
 ## 10. Milestones
 
-| # | Milestone | Outcome |
+| # | Milestone | Done when |
 |---|---|---|
-| **M0** | Platform spike | Small programs that *watch*, *read* and *write* text and images on Windows, Ubuntu X11 and Ubuntu GNOME Wayland. Confirms the Wayland approach. |
-| **M1** | Text sync MVP | Two agents, manual IP, mutual TLS with pinned fingerprints, text sync with loop prevention. Run from a terminal. |
-| **M2** | Images + discovery + pairing | PNG images, chunking, mDNS discovery, numeric-comparison pairing. |
-| **M3** | Daily-driver polish | Tray, hotkeys, notifications, autostart, config file, privacy filters, installers (.msi / .deb). |
-| **M4** | Extras | HTML and rich text, files, history, lazy transfer for large items, relay or overlay-network support. |
+| **M0** | Desktop spike | Windows: hotkey → synthetic `Ctrl+C` → read text/image → restore. Ubuntu 26.04: the extension does the same and prints the result. Both paths verified by hand. |
+| **M1** | Text end-to-end | Two agents with a manual peer address, TLS with fingerprints exchanged manually, `Ctrl+Alt+C` / `Ctrl+Alt+V` moves text in both directions. |
+| **M2** | Images + discovery + pairing | PNG images with chunking, mDNS, numeric-comparison pairing UI on both sides. |
+| **M3** | Daily driver | Clipboard restore, cross-cut, terminal overrides, offline queue, notifications, tray/top-bar status, autostart, `install-ubuntu.sh`, release builds. |
+| **M4** | Extras | Files, HTML, history, optional overlay-VPN notes for other networks. |
 
 ## 11. Risks and open questions
 
-| Risk / question | Mitigation |
+| Risk | Mitigation |
 |---|---|
-| GNOME Wayland blocks background clipboard access | GNOME Shell extension bridge (§5.3); Xorg session or hotkey mode as fallback. Validate in M0. |
-| Machines on different networks (home vs office) | v1 supports manual host:port. Recommend an overlay VPN (for example Tailscale or ZeroTier) instead of building a relay; revisit later. |
-| Corporate or Windows firewall blocks the port or mDNS | Installer firewall rule, manual peer address, clear diagnostics in `crossclip status`. |
-| Syncing secrets accidentally | Honour password-manager hints, pause hotkey, optional app blocklist, nothing ever stored on disk by default. |
-| Large or odd clipboard formats (Office, image editors) | Size cap; v1 falls back to text or PNG only. |
+| GNOME Shell extension API changes between GNOME versions | Keep the extension tiny; declare supported `shell-version`s; re-test on each Ubuntu release. |
+| New extensions need a logout/login on Wayland before they load | Installer tells the user to log out once. This is only needed at install or upgrade. |
+| Timing of synthetic keystrokes in slow apps | Configurable delays (`copy_wait_ms`, `restore_delay_ms`) and per-app overrides. |
+| `Ctrl+Alt` acts as AltGr on some keyboard layouts (e.g. Polish) | All shortcuts are configurable. |
+| Clipboard-history extensions on GNOME may record the temporary writes | Documented; restore limits the effect. |
+| Unsigned `.exe` triggers SmartScreen on first run | Documented; code signing later if needed. |
 
 ## 12. Alternatives considered
 
-- **Existing tools** — Barrier / Input Leap and Synergy (keyboard and mouse
-  sharing with clipboard sync), KDE Connect / GSConnect, LocalSend (file-focused).
-  They are reasonable choices, but they bring features we don't need (input
-  sharing), have weak image support on Wayland, or are not built around
-  automatic clipboard sync. Building our own keeps the tool small and focused,
-  and lets us own the Wayland story.
-- **Cloud relay** (both agents talk to a server) — works across networks but
-  adds hosting, latency and a privacy surface. Deferred; an overlay VPN gives
-  the same reach with our LAN protocol unchanged.
-- **Polling the clipboard** instead of events — simpler but wasteful and laggy;
-  used only as a last-resort backend.
+- **Mirror the normal clipboard automatically** (v0.1 design). Rejected: the user
+  wants explicit shortcuts, and on GNOME Wayland background clipboard watching is
+  the hardest part to get working.
+- **Portals (`GlobalShortcuts` + `RemoteDesktop` for keystrokes) instead of an
+  extension.** This avoids the extension, but the RemoteDesktop portal asks the
+  user for permission and shows a "screen is being controlled" indicator, and
+  there is still no clipboard read without focus. Rejected in favour of the extension.
+- **Do everything in the GNOME extension (including networking).** GJS has no
+  mDNS, and the protocol and crypto would be duplicated in JS. Rejected.
+- **Existing tools** (Input Leap/Barrier, KDE Connect/GSConnect, LocalSend). They
+  either sync the normal clipboard automatically, focus on files, or add features
+  we don't need.
