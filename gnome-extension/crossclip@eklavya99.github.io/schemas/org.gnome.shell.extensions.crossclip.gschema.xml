@@ -16,5 +16,22 @@
       <summary>Cross-paste shortcut</summary>
       <description>Paste the Cross Clipboard item into the focused window.</description>
     </key>
+    <key name="terminal-wm-classes" type="as">
+      <default>['org.gnome.Ptyxis', 'org.gnome.Terminal', 'gnome-terminal-server', 'org.gnome.Console', 'kitty', 'Alacritty', 'org.wezfurlong.wezterm', 'com.mitchellh.ghostty', 'foot', 'com.gexperts.Tilix', 'terminator', 'xterm', 'org.kde.konsole']</default>
+      <summary>Terminal window classes</summary>
+      <description>Windows whose WM class or app id matches one of these (case-insensitive) get Ctrl+Shift+C / Ctrl+Shift+V, because Ctrl+C interrupts programs in a terminal.</description>
+    </key>
+    <key name="copy-wait-ms" type="i">
+      <range min="50" max="5000"/>
+      <default>400</default>
+      <summary>Copy wait (ms)</summary>
+      <description>How long an app gets to put its selection on the clipboard after the copy keystroke.</description>
+    </key>
+    <key name="paste-restore-delay-ms" type="i">
+      <range min="50" max="10000"/>
+      <default>500</default>
+      <summary>Paste restore delay (ms)</summary>
+      <description>How long an app gets to read the pasted item before the normal clipboard is restored.</description>
+    </key>
   </schema>
 </schemalist>
