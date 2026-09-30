@@ -1,0 +1,12 @@
+[package]
+name = "crossclip-core"
+description = "Platform-independent core of CrossClip: model, protocol, transport, pairing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

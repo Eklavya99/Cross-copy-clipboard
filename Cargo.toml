@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+repository = "https://github.com/Eklavya99/Cross-copy-clipboard"
+
+[workspace.dependencies]
+crossclip-core = { path = "crates/crossclip-core" }
+crossclip-win = { path = "crates/crossclip-win" }
+crossclip-dbus = { path = "crates/crossclip-dbus" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Small, fast binaries: the agent runs in the background all day.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

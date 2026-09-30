@@ -1,0 +1,13 @@
+[package]
+name = "crossclip-dbus"
+description = "D-Bus service used by the CrossClip GNOME Shell extension."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crossclip-core.workspace = true
+
+[lints]
+workspace = true

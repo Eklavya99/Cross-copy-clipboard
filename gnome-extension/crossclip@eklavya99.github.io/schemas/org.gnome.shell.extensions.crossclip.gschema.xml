@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.crossclip" path="/org/gnome/shell/extensions/crossclip/">
+    <key name="cross-copy" type="as">
+      <default><![CDATA[['<Control><Alt>c']]]></default>
+      <summary>Cross-copy shortcut</summary>
+      <description>Copy the selection into the Cross Clipboard and send it to the other machine.</description>
+    </key>
+    <key name="cross-cut" type="as">
+      <default><![CDATA[['<Control><Alt>x']]]></default>
+      <summary>Cross-cut shortcut</summary>
+      <description>Cut the selection into the Cross Clipboard and send it to the other machine.</description>
+    </key>
+    <key name="cross-paste" type="as">
+      <default><![CDATA[['<Control><Alt>v']]]></default>
+      <summary>Cross-paste shortcut</summary>
+      <description>Paste the Cross Clipboard item into the focused window.</description>
+    </key>
+  </schema>
+</schemalist>
