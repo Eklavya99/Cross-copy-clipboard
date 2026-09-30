@@ -6,3 +6,7 @@
 
 /// Crate version, reported in the protocol `HELLO` frame and by `crossclip --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod model;
+
+pub use model::ClipContent;
